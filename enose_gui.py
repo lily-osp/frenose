@@ -26,11 +26,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import QTimer, QDateTime
 from sklearn.neural_network import MLPClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
 import joblib
 import pyqtgraph as pg
 
@@ -297,7 +295,7 @@ class E_NoseGUI(QMainWindow):
             self.data_history = [[] for _ in range(8)]
 
     def train_model(self):
-        """Train the model using the loaded smell libraries or saved data."""
+        """Train the ANN model using the loaded smell libraries or saved data."""
         if not smell_libraries:
             QMessageBox.warning(
                 self, "No Data", "No smell libraries or saved data loaded!"
@@ -320,29 +318,50 @@ class E_NoseGUI(QMainWindow):
             scaler = StandardScaler()
             X = scaler.fit_transform(X)
 
+            # Data augmentation: Double the data by adding small random noise
+            X_augmented = np.vstack(
+                [X, X + np.random.normal(0, 0.1, X.shape)]
+            )  # Add noise
+            y_augmented = np.hstack([y, y])  # Double the labels
+
             # Split the data into training and testing sets
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
+                X_augmented, y_augmented, test_size=0.2, random_state=42
             )
 
-            # Train a Random Forest Classifier (you can switch to other models like SVM or MLP)
+            # Define the ANN model (MLPClassifier)
             global model
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
+            model = MLPClassifier(
+                hidden_layer_sizes=(
+                    16,
+                    32,
+                    16,
+                ),  # Double the input layer size (8 -> 16)
+                activation="relu",
+                solver="adam",
+                max_iter=500,
+                random_state=42,
+                early_stopping=True,  # Enable early stopping
+                validation_fraction=0.2,  # Use 20% of data for validation
+            )
+
+            # Train the model
             model.fit(X_train, y_train)
 
-            # Evaluate the model using cross-validation
-            cv_scores = cross_val_score(model, X, y, cv=5, scoring="accuracy")
-            cv_accuracy = np.mean(cv_scores)
-
-            # Evaluate on the test set
+            # Evaluate the model
             y_pred = model.predict(X_test)
             test_accuracy = accuracy_score(y_test, y_pred)
-            classification_rep = classification_report(y_test, y_pred)
+
+            # Generate classification report with zero_division parameter
+            classification_rep = classification_report(
+                y_test,
+                y_pred,
+                zero_division=0,  # Set zero_division to 0
+            )
 
             # Show the results to the user
             result_message = (
                 f"Model trained successfully!\n"
-                f"Cross-Validation Accuracy: {cv_accuracy * 100:.2f}%\n"
                 f"Test Set Accuracy: {test_accuracy * 100:.2f}%\n"
                 f"Classification Report:\n{classification_rep}"
             )
@@ -380,7 +399,7 @@ class E_NoseGUI(QMainWindow):
             QMessageBox.warning(self, "No Model", "No model to export!")
 
     def add_smell_library(self):
-        """Record and save a new smell library."""
+        """Record and save a new smell library using 150 raw data points + 25 averaged data points."""
         smell_name, ok = QInputDialog.getText(
             self, "Add New Smell", "Enter smell name:"
         )
@@ -391,6 +410,7 @@ class E_NoseGUI(QMainWindow):
             recorded_data = []
             self.progress_bar.setValue(0)
 
+            # Step 1: Record 150 raw data points
             for i in range(150):
                 while arduino and arduino.in_waiting == 0:
                     QApplication.processEvents()
@@ -411,44 +431,59 @@ class E_NoseGUI(QMainWindow):
                     QApplication.processEvents()
 
             if len(recorded_data) == 150:
-                filtered_data = []
-                for i in range(0, 150, 6):
+                # Step 2: Generate 25 averaged data points
+                averaged_data = []
+                for i in range(0, 150, 6):  # Average every 6 points
                     chunk = recorded_data[i : i + 6]
                     avg_point = np.mean(chunk, axis=0).tolist()
-                    filtered_data.append(avg_point)
+                    averaged_data.append(avg_point)
 
+                # Step 3: Combine raw and averaged data (150 + 25 = 175 points)
+                combined_data = recorded_data + averaged_data
+
+                # Step 4: Save the combined data to a CSV file
                 file_name = os.path.join("smell_data", f"{smell_name}.csv")
-                pd.DataFrame(filtered_data).to_csv(file_name, index=False)
-                smell_libraries[smell_name] = filtered_data
+                pd.DataFrame(combined_data).to_csv(file_name, index=False)
+                smell_libraries[smell_name] = combined_data
                 self.log_text.append(
-                    f"Smell library '{smell_name}' saved to {file_name}."
+                    f"Smell library '{smell_name}' saved to {file_name} with 175 data points."
                 )
             else:
                 self.log_text.append("Recording failed. Please try again.")
 
     def import_smell_data(self):
-        """Import smell data from a CSV file."""
-        file_name, _ = QFileDialog.getOpenFileName(
+        """Import smell data from one or more CSV files."""
+        file_names, _ = QFileDialog.getOpenFileNames(
             self, "Import Smell Data", "", "CSV Files (*.csv)"
         )
-        if file_name:
-            try:
-                smell_name = os.path.splitext(os.path.basename(file_name))[0]
-                data = pd.read_csv(file_name).values.tolist()
-                smell_libraries[smell_name] = data
-                self.log_text.append(
-                    f"Smell data for '{smell_name}' imported successfully."
-                )
-                QMessageBox.information(
-                    self,
-                    "Import Successful",
-                    f"Smell data for '{smell_name}' imported successfully.",
-                )
-            except Exception as e:
-                self.log_text.append(f"Failed to import smell data: {str(e)}")
-                QMessageBox.critical(
-                    self, "Import Failed", f"Failed to import smell data: {str(e)}"
-                )
+        if file_names:
+            for file_name in file_names:
+                try:
+                    # Extract the smell name from the file name (without extension)
+                    smell_name = os.path.splitext(os.path.basename(file_name))[0]
+
+                    # Read the CSV file and convert it to a list of data points
+                    data = pd.read_csv(file_name).values.tolist()
+
+                    # Store the data in the smell_libraries dictionary
+                    smell_libraries[smell_name] = data
+
+                    # Log the successful import
+                    self.log_text.append(
+                        f"Smell data for '{smell_name}' imported successfully."
+                    )
+                except Exception as e:
+                    # Log any errors that occur during import
+                    self.log_text.append(
+                        f"Failed to import smell data from '{file_name}': {str(e)}"
+                    )
+
+            # Notify the user that all files have been processed
+            QMessageBox.information(
+                self,
+                "Import Successful",
+                f"Successfully imported {len(file_names)} smell data files.",
+            )
 
 
 if __name__ == "__main__":
